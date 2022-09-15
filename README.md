@@ -1,2 +1,2 @@
 # MetaLTDS
-repo for MetaLTDS
+code for MetaLTDS
