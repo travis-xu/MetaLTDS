@@ -22,22 +22,8 @@ import torch.nn as nn
 import shutil
 from utils import check_resume, load_checkpoint, save_model
 from copy import deepcopy
-from utils.utils_CL import calculate_mask_ratio, set_requires_grad, configure_optimizers, calculate_mask
+from utils.utils_CL import set_requires_grad, configure_optimizers, calculate_mask, calculate_mask_expand, calculate_bottleneck_size, calculate_adapter_num, calculate_task_adapter_id
 from scorer import score_folder
-
-
-def get_checkpoint(log_dir, index_to_load):
-    file = glob.glob(f"{log_dir}/*")
-    for f in file:
-        f_noprefix = f.replace(f"{log_dir}","")
-        num = [int(s) for s in re.findall(r'\d+', f_noprefix)]
-        if index_to_load in num:
-            version = os.listdir(f+"/lightning_logs")[0]
-            check_name = os.listdir(f+"/lightning_logs/"+ version+"/checkpoints/")[0]
-            # checkpoint_name = f.replace("[","\[").replace("]","\]").replace("\'","\\'")+"/lightning_logs/"+ version+"/checkpoints/"+check_name
-            checkpoint_name = f+"/lightning_logs/"+ version+"/checkpoints/"+check_name
-    return checkpoint_name
-
 
 def train(hparams, *args):
     if(hparams.CL == "MULTI"):
@@ -47,10 +33,21 @@ def train(hparams, *args):
         hparams.multi = False
         hparams.continual = True
 
-    # if hparams.single:
     from single_CL_learner import Seq2SeqToD
-    # else:
-    #     from CL_learner import Seq2SeqToD
+
+    ## travis
+    # resume_folder, resume_task_num = check_resume(hparams, task_num=1)
+    resume_folder, resume_task_num = check_resume(hparams, resume_task_num=hparams.resume_task_num)
+
+    # max_bottleneck_size = hparams.bottleneck_size
+    max_bottleneck_size = None
+    if hparams.split_mask:
+        calculate_adapter_num(hparams.num_of_adapter)
+        # hparams.bottleneck_size = calculate_bottleneck_size(resume_task_num)
+
+    # hparams.bottleneck_size = 50*13
+    # hparams.bottleneck_size = min(50*(resume_task_num+1), max_bottleneck_size)
+    # hparams.number_of_adpt = resume_task_num+1
 
     # torch.set_num_threads(1)
     set_seeds(hparams.seed)
@@ -67,24 +64,29 @@ def train(hparams, *args):
             keys = domains_selected if hparams.test_every_step else domains_selected[::-1]
         elif hparams.fix_dataset:
             keys = ['[\'sgd_weather\']', '[\'sgd_trains\']', '[\'MWOZ_attraction\']']
-        elif hparams.keys1:
-            keys = ['[\'MWOZ_restaurant\']', '[\'MWOZ_hotel\']', '[\'MWOZ_attraction\']', '[\'MWOZ_taxi\']', '[\'MWOZ_train\']']
+        # elif hparams.keys1:
+            # keys = ['[\'MWOZ_restaurant\']', '[\'MWOZ_hotel\']', '[\'MWOZ_attraction\']', '[\'MWOZ_taxi\']', '[\'MWOZ_train\']']
         else:
-            random.seed(hparams.seed)
+            seed = 1 if hparams.keys1 else hparams.seed
+            # random.seed(hparams.seed)
+            random.seed(seed)
             keys = list(train_loader.keys())
             random.shuffle(keys)
 
         train_loader = {key: train_loader[key] for key in keys}
-        print(f"RUNNING WITH SEED {hparams.seed}")
+        if hparams.keys1:
+            logger.info(f"keys is 1 while RUNNING WITH SEED {hparams.seed}")
+        else:
+            logger.info(f"RUNNING WITH SEED {hparams.seed}")
         for k,_ in train_loader.items():
             print(k)
         # print()
 
-    ## travis
-    # resume_folder, resume_task_num = check_resume(hparams, task_num=1)
-    resume_folder, resume_task_num = check_resume(hparams, resume_task_num=hparams.resume_task_num)
+
     if resume_folder:
-        load_checkpoint(model, resume_folder, hparams, resume_task_num)
+        adapter_task_id = calculate_task_adapter_id(resume_task_num)[-1]
+        print(f"adapter_task_id {adapter_task_id}")
+        load_checkpoint(model, resume_folder, hparams, resume_task_num, adapter_task_id=adapter_task_id)
         # load_checkpoint(model, resume_folder, hparams, resume_task_num, backbone=True)
 
     task_seen_so_far = []
@@ -92,51 +94,86 @@ def train(hparams, *args):
     if(hparams.CL == "GEM"): model.set_up_gem()
 
     if hparams.multi:
-        start = time.time()
-        trainer = Trainer(
-                default_root_dir=hparams.saving_dir,
-                accumulate_grad_batches=hparams.gradient_accumulation_steps,
-                gradient_clip_val=hparams.max_norm,
-                max_epochs=hparams.n_epochs,
-                callbacks=[pl.callbacks.EarlyStopping(monitor='val_loss',min_delta=0.00, patience=5,verbose=False, mode='min')],
-                gpus=[0],
-                )
-        trainer.fit(model, train_loader, val_loader)
-        end = time.time()
-        print ("Time elapsed:", end - start)
-        model.model.save_pretrained(f'{hparams.saving_dir}')
-        model.tokenizer.save_pretrained(f'{hparams.saving_dir}')
-        test_model_seq2seq(hparams,model.model,model.tokenizer,dev_val_loader,time=f"FINAL")
+        best_val_loss = np.inf
+        best_epoch_idx = 0
+        set_requires_grad(model)
+        optimizers = configure_optimizers(model)
+        cnt = 0
+        start_epoch = 0  # if we are going to save checkpoint in other folder, then we recalculate the starting epoch
+        for epoch_idx in range(start_epoch, hparams.n_epochs):
+            logger.info("Epoch:{}".format(epoch_idx))
+            pbar = tqdm(enumerate(train_loader), total=len(train_loader))
+
+            print_diag = False
+            train_loss, train_loss_reg = model.train_epoch(None, len(train_loader), pbar, optimizers, hparams,
+                                                           print_diag=print_diag)   # task_num=None
+            if train_loss_reg:
+                logger.debug('Train Loss Reg:{:.3f} '.format(train_loss_reg))
+
+            if (epoch_idx + 1) % int(1) == 0:  # args['evalp']
+                print("STARTING EVALUATION")
+                pbar = tqdm(enumerate(val_loader), total=len(val_loader))
+                valid_loss = model.eval_epoch(None, pbar, hparams)  # task_num=None
+                if valid_loss < best_val_loss:
+                    best_val_loss = valid_loss
+                    best_epoch_idx = epoch_idx
+                    best_model = deepcopy(model.model.state_dict())
+                    logger.info('Val Loss:{:.3f} '.format(valid_loss) + " MODEL SAVED")
+                    cnt = 0
+                else:
+                    logger.info('Val Loss:{:.3f}'.format(valid_loss))
+                    cnt += 1
+                if cnt >= 5:  # 8
+                    print("Ran out of patient, early stop...")
+                    break
+
+        # Restore best
+        model.model.load_state_dict(best_model)
+        print('best model reloaded')
+        test_model_seq2seq(hparams,model,model.tokenizer,dev_val_loader,time=f"FINAL")
+
     elif hparams.continual:
-        # set_requires_grad(model)
         for task_num, (task_id, task_loader) in enumerate(train_loader.items()):
             logger.info('')
             logger.info(f"TASK {task_num}:{task_id}")
-
-            if hparams.lamb:
-                if len(train_loader) > 11:
-                    model.lamb = 25 - 2 * task_num
-                    print(f'lamb: {model.lamb}')
-                else:
-                    # total_mask_ratio = calculate_mask_ratio(model.mask_pre)
-                    model.lamb = (5 - task_num) / 4  # math.sqrt(1.5 - total_mask_ratio) 1.5 * 1 /
-
             if task_num < resume_task_num:
                 model.first_task = False
                 task_seen_so_far.append(task_id)
                 continue
 
+            adapter_id, adapter_task_id = None, None
+            if hparams.split_mask:
+                adapter_id, adapter_task_id = calculate_task_adapter_id(task_num)
+                logger.info(f"adapter_id: {adapter_id}, adapter_task_id: {adapter_task_id}")
+                logger.info(f"bottleneck size: {hparams.bottleneck_size_list[adapter_id]}")
+
             if task_num > resume_task_num:
+                # adapter_task_id = calculate_task_adapter_id(task_num)[-1] if hparams.split_mask else None
+                # hparams.bottleneck_size = calculate_bottleneck_size(task_num)
+                # hparams.bottleneck_size = min(50 * (task_num + 1), max_bottleneck_size)
+                # hparams.number_of_adpt = task_num + 1
                 set_seeds(hparams.seed)
                 model.init_model(hparams)
 
                 if hparams.CL == "ADAPTER":
-                    # model.model.adapter_blocks.load_state_dict(best_model)
+                    model.model.adapter_blocks.load_state_dict(best_model)
                     # load_checkpoint(model, save_folder, hparams, task_num, backbone=True)
-                    load_checkpoint(model, save_folder, hparams, task_num, backbone=False)
+                    # _, adapter_task_id = calculate_task_adapter_id(task_num)
+                    # load_checkpoint(model, save_folder, hparams, task_num, backbone=False, adapter_task_id=adapter_task_id) # max_bottleneck_size=max_bottleneck_size
                 else:
                     model.model.load_state_dict(best_model)
                 # load_checkpoint(model, save_folder, hparams, task_num)
+
+            if hparams.split_mask:
+                # adapter_id, adapter_task_id = calculate_task_adapter_id(task_num)
+                # model.model.reset_mask(hparams, task_num)
+                if adapter_id > 0 and adapter_task_id == 0:
+                    model.init_mask_mem()
+
+            if hparams.todcl_mask or hparams.expand_mask:
+                hparams.cur_bottleneck_size = calculate_bottleneck_size(task_num)
+                calculate_mask_expand(model, task_num)
+                model.model.reset_mask(hparams, task_num)
 
             set_requires_grad(model)
             optimizers = configure_optimizers(model)
@@ -165,16 +202,9 @@ def train(hparams, *args):
                     ## this task_loader include data generated by the same model
                     task_loader = make_loader(hparams,train_datasets[task_id]+aug_current_task+aug_data_prev_task,model.tokenizer)
 
-
             ## CORE
             # start = time.time()
             ### travis
-            '''retrain_data = []
-            for mem_per_task in model.episodic_mem.values():
-                retrain_data += mem_per_task
-            print(f"Retrain Memory Size {len(retrain_data)}")  # + Train Data Size {len(train_datasets[task_id])}
-            task_loader = make_loader(hparams, train_datasets[task_id] + retrain_data, model.tokenizer)'''
-
             if hparams.CL == "ADAPTER":
                 best_model = {k: v.cpu() for k, v in model.model.adapter_blocks.state_dict().items()}
                 # init_state = deepcopy({k: v.cpu() for k, v in model.model.adapter_blocks.state_dict().items()})
@@ -193,17 +223,10 @@ def train(hparams, *args):
             best_epoch_idx = 0
             cnt = 0
             start_epoch = 0 # if we are going to save checkpoint in other folder, then we recalculate the starting epoch
+            # if hparams.expand_mask or hparams.todcl_mask:
+            #     model.model.reset_mask(hparams, task_num)
             for epoch_idx in range(start_epoch, hparams.n_epochs):
                 logger.info("Epoch:{}".format(epoch_idx))
-
-                # if epoch_idx >= 1:  #  and task_num == 0
-                #     # model.first_task = False
-                #     cnt += 1
-                #     if cnt >= 5:  # 8
-                #         print("Ran out of patient, early stop...")
-                #         break
-                #     continue
-
                 # for step, batch in enumerate(iter_bar):
                 # pbar = tqdm(task_loader, desc='Train Iter (loss=X.XXX)')    # iter_bar
                 pbar = tqdm(enumerate(task_loader), total=len(task_loader))
@@ -228,7 +251,7 @@ def train(hparams, *args):
 
                         if hparams.CL == "ADAPTER":
                             best_model = {k: v.cpu() for k, v in model.model.adapter_blocks.state_dict().items()}
-                            save_model(model, save_folder, best_epoch_idx, hparams, save_type='backbone')
+                            # save_model(model, save_folder, best_epoch_idx, hparams, save_type='backbone')
                         else:
                             best_model = deepcopy(model.model.state_dict())
                             # best_model = {k: v.cpu() for k, v in model.model.state_dict().items()}
@@ -244,27 +267,14 @@ def train(hparams, *args):
 
             # Restore best
             if hparams.CL == "ADAPTER":
-                # model.model.adapter_blocks.load_state_dict(best_model)
-                load_checkpoint(model, save_folder, hparams, task_num, backbone=True, before_retrain=True)
+                model.model.adapter_blocks.load_state_dict(best_model)
+                # load_checkpoint(model, save_folder, hparams, task_num, backbone=True, before_retrain=True)
             else:
                 model.model.load_state_dict(best_model)
             print('best model reloaded')
 
-
-            # utils.set_model_(self.model, best_model)
-
             # end = time.time()
             # print ("Time elapsed: %.2fs" % (end - start))
-            '''
-            #load best model
-            # this model are better if the are runned to they epoch number
-            if(hparams.CL != "LAMOL" and hparams.CL != "EWC"):
-                # checkpoint = torch.load(trainer.checkpoint_callback.best_model_path) use this if the next doesn't work
-                checkpoint = torch.load(trainer.checkpoint_callback.best_model_path, map_location=lambda storage, loc: storage)
-                print("load from:",trainer.checkpoint_callback.best_model_path)
-                checkpoint['state_dict'] = { k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items() }
-                model.model.load_state_dict(checkpoint['state_dict'])
-            '''
 
             if hparams.mask:
                 mask = calculate_mask(model, task_num)
@@ -272,8 +282,10 @@ def train(hparams, *args):
 
             # save to folder
             # save_model(model, save_folder, best_epoch_idx, hparams)
-            save_model(model, save_folder, best_epoch_idx, hparams, save_type='backbone')
-            save_model(model, save_folder, best_epoch_idx, hparams, save_type='mask')
+            if hparams.CL == "ADAPTER" or hparams.CL == "VANILLA":
+                save_model(model, save_folder, best_epoch_idx, hparams, save_type='backbone')
+                if hparams.mask:
+                    save_model(model, save_folder, best_epoch_idx, hparams, save_type='mask')
 
             # test_every_step
             if (hparams.test_every_step):   # and task_num>0):
@@ -281,7 +293,7 @@ def train(hparams, *args):
                     if hparams.mask_infer:
                         test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                                                    time=f"{task_num}_{task_id}")
-                        if task_num > 0:
+                        if task_num > 0 and not hparams.no_TIL:
                             test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                                                        time=f"{task_num}_{task_id}", TIL=True)
                     elif hparams.mask:    # test with current-task mask
@@ -292,7 +304,9 @@ def train(hparams, *args):
                             test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                                                        time=f"{task_num}_{task_id}", masks=mask)
                     elif hparams.single:
-                        test_model_seq2seq_ADAPTER(hparams,model,model.tokenizer,dev_val_loader,test_datasets,time=f"{task_num}_{task_id}", single_task=True)
+                        test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
+                                                   time=f"{task_num}_{task_id}")
+                        # test_model_seq2seq_ADAPTER(hparams,model,model.tokenizer,dev_val_loader,test_datasets,time=f"{task_num}_{task_id}", single_task=True)
                     else:
                         test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                                                    time=f"{task_num}_{task_id}")
@@ -303,11 +317,11 @@ def train(hparams, *args):
             model.first_task = False
 
             ## retrain and test
-            if (task_num > 0):
+            if (task_num > 0) and len(model.episodic_mem.keys()) > 0:
                 ### travis: retrain
                 if hparams.retrain or hparams.meta:
                     print("STARTING RETRAINING")
-                    # set_seeds(hparams.seed)
+                    set_seeds(hparams.seed)
 
                     # model.init_model(hparams)
                     # model.model.adapter_blocks.load_state_dict(best_model)
@@ -371,6 +385,8 @@ def train(hparams, *args):
                                 break
                         else:   # 训练定量的epoch，不val
                             cnt += 1
+                            # if adapter_id==2 and adapter_task_id==3:
+                            #     break
                             if cnt >= hparams.retrain_epochs:
                                 break
 
@@ -385,7 +401,6 @@ def train(hparams, *args):
 
                 ### travis: test with all masks
                 if (hparams.test_every_step):
-
                     if hparams.mask:
                         if hparams.retrain:
                             test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
@@ -394,7 +409,7 @@ def train(hparams, *args):
                         #     test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                         #                                time=f"{task_num}_{task_id}", use_all_masks=True,
                         #                                masks=model.mask_pre)
-                            if hparams.mask_infer:
+                            if hparams.mask_infer and not hparams.no_TIL:
                                 test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
                                                            time=f"{task_num}_{task_id}", TIL=True, retrain=True)
 
@@ -404,9 +419,18 @@ def train(hparams, *args):
 
             ## save some training data into the episodic mem
             if hparams.CL == "AGEM":
-                for idx_b, b in enumerate(task_loader):
-                    model.episodic_mem["all"].append(b)
-                    if idx_b == hparams.episodic_mem_size: break
+                # for idx_b, b in enumerate(task_loader):
+                #     model.episodic_mem["all"].append(b)
+                #     if idx_b == hparams.episodic_mem_size: break
+                model.sampling(train_datasets, task_id)
+                save_model(model, save_folder, best_epoch_idx, hparams, save_type='memory')
+                print('agem')
+                agem_data = []
+                for mem_per_task in model.episodic_mem.values():
+                    agem_data += mem_per_task
+                print(f"AGEM Memory Size {len(agem_data)}")
+                model.agem_mem_iter = iter(make_loader(hparams, agem_data, model.tokenizer))
+
             elif hparams.CL == "REPLAY":
                 # in percentage
                 set_seeds(hparams.seed)
@@ -423,7 +447,7 @@ def train(hparams, *args):
                 model.reply_memory += sample(train_datasets[task_id], min(len(train_datasets[task_id]), size_per_task))
                 save_model(model, save_folder, best_epoch_idx, hparams, save_type='memory')
             elif hparams.CL == "EWC":
-                set_seeds(hparams.seed)
+                # set_seeds(hparams.seed)
                 model.sampling(train_datasets, task_id)
                 save_model(model, save_folder, best_epoch_idx, hparams, save_type='memory')
                 # for idx_b, b in enumerate(task_loader):
@@ -433,7 +457,7 @@ def train(hparams, *args):
             else:  ## save example per task
                 if hparams.retrain and (task_num < len(train_loader)-1):
                     set_seeds(hparams.seed)
-                    model.sampling(train_datasets, task_id)
+                    model.sampling(train_datasets, task_id, task_num)
                     save_model(model, save_folder, best_epoch_idx, hparams, save_type='memory')
 
             ##### Compute Fisher info Matrix for EWC
@@ -468,25 +492,6 @@ def train(hparams, *args):
                         model.fisher[name_f] /= len(model.episodic_mem[task_id]) #*hparams.train_batch_size
                     model.model.zero_grad()
             task_seen_so_far.append(task_id)
-
-        '''
-        model.model.save_pretrained(f'{hparams.saving_dir}')
-        model.tokenizer.save_pretrained(f'{hparams.saving_dir}')
-        '''
-
-        '''if(hparams.CL == "ADAPTER"):
-            if hparams.mask_infer:
-                test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
-                                           time=f"FINAL")
-            elif hparams.mask:
-                test_model_seq2seq_ADAPTER(hparams, model, model.tokenizer, dev_val_loader, test_datasets,
-                                           time=f"FINAL", use_all_masks=True, masks=model.mask_pre)
-            else:
-                test_model_seq2seq_ADAPTER(hparams,model,model.tokenizer,dev_val_loader,test_datasets,time=f"FINAL")
-        else:
-            test_model_seq2seq(hparams, model, model.tokenizer, dev_val_loader, time=f"FINAL")
-            # test_model_seq2seq(hparams,model.model,model.tokenizer,dev_val_loader,time=f"FINAL")'''
-
 
 if __name__ == '__main__':
     train(hparams)

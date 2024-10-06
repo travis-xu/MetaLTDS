@@ -85,11 +85,6 @@ def calculate_mask_ratio(mask):
     return float(curr_task_elem) / total_elem
 
 def calculate_mask(model, t):
-    # t = task_num
-    # if model.args.multi_gpu and not model.args.distributed:
-    #     mask = model.model.module.mask(t, s=model.smax)
-    # else:
-    #     mask = model.model.mask(t, s=model.smax)
     if hparams.split_mask:
         adapter_id, adapter_task_id = calculate_task_adapter_id(t)
         appendix = f'.mixadaptermask.{adapter_id}'
@@ -122,10 +117,6 @@ def calculate_mask(model, t):
     aa = []
     for n, p in model.model.named_parameters():
         aa.append(n)
-        # if model.args.multi_gpu and not model.args.distributed:
-        #     vals = model.model.module.get_view_for(n, p, model.mask_pre)
-        # else:
-        #     vals = model.model.get_view_for(n, p, model.mask_pre)
         vals = model.model.get_view_for(n, p, model.mask_pre, appendix=appendix)
         if hparams.cumulative_mask:
             vals_cumulative = model.model.get_view_for(n, p, model.mask_pre_cumulative, appendix=appendix)
@@ -163,15 +154,10 @@ def calculate_mask_expand(model, task_num):
                 vals = masks[n.replace('.bias', '')].data.view(-1)
             if vals is not None:
                 model.mask_expand[n] = 1 - vals
-    # model.mask_expand = torch.full(hparams.bottleneck_size, np.inf)
 
 
 def calculate_bottleneck_size(task_num):
     if hparams.split_mask:
-        # if hparams.num_of_adapter == 3:
-        #     adapter_id = calculate_task_adapter_id(task_num)[0]
-        #     cur_bottleneck_size = 300 if adapter_id != 2 else 50
-        # else:
         raise
     else:
         mask_task_id = None
@@ -186,13 +172,9 @@ def calculate_bottleneck_size(task_num):
             cur_bottleneck_size = (mask_id+1)*150
         elif hparams.num_of_mask == 3:
             mask_id = abs(task_num - 1) // 4
-            # if hparams.split_mask:
-            #     mask_task_id = (task_num - 1) % 4 if mask_id > 0 else task_num
             cur_bottleneck_size = (mask_id+1)*200
         elif hparams.num_of_mask == 2:
             mask_id = abs(task_num - 1) // 6
-            # if hparams.split_mask:
-            #     mask_task_id = (task_num - 1) % 6 if mask_id > 0 else task_num
             cur_bottleneck_size = (mask_id + 1) * 300
         else:
             raise
@@ -201,33 +183,17 @@ def calculate_bottleneck_size(task_num):
 
 def calculate_task_adapter_id(task_num):
     adapter_id, adapter_task_id = None, None
-    # if hparams.num_of_adapter == 3:
     for adapter_id in range(hparams.num_of_adapter):
         if sum(hparams.task_adapter_list[:(adapter_id+1)]) > task_num:
             adapter_task_id = task_num - sum(hparams.task_adapter_list[:adapter_id]) if adapter_id > 0 else task_num
             break
         else:
             continue
-        # if hparams.bottleneck_size == 600:
-        #     adapter_id = abs(task_num - 1) // 4
-        #     adapter_task_id = (task_num - 1) % 4 if adapter_id > 0 else task_num
-        # elif hparams.bottleneck_size == 650:
-        #     adapter_id = task_num // 6
-        #     adapter_task_id = task_num % 6
-        # adapter_id = abs(task_num - 1) // 4
-        # adapter_task_id = (task_num - 1) % 4 if adapter_id > 0 else task_num
-    # elif hparams.num_of_adapter == 2:
-        # adapter_id = 0 if task_num == 0 else 1
-        # adapter_task_id = (task_num - 1) if adapter_id > 0 else task_num
-        # adapter_id = abs(task_num - 1) // 6
-        # adapter_task_id = (task_num - 1) % 6 if adapter_id > 0 else task_num
-    # else:
-    #     raise
+
     return adapter_id, adapter_task_id
 
 def calculate_adapter_num(num_of_adapter):
     if num_of_adapter == 3:
-        # if hparams.bottleneck_size == 600:
         if "TM" in hparams.dataset_list:
             if hparams.bottleneck_size == 600:
                 hparams.task_adapter_list = [5, 4, 4]
@@ -267,38 +233,22 @@ def calculate_adapter_num(num_of_adapter):
     if not hparams.mode == 'test':
         logger.info(f"task_adapter_list {hparams.task_adapter_list}, bottleneck_size_list {hparams.bottleneck_size_list}")
 
-    # hparams.bottleneck_size = int(hparams.bottleneck_size / hparams.num_of_adapter)
-    # logger.info(f'bottleneck size per adapter: {hparams.bottleneck_size}')
-    # return adapter_num
 
 def set_requires_grad(model, retrain=False):
-    # assert hparams.CL == "ADAPTER" or hparams.CL == "LIMIT-REPLAY"
     if retrain:
-        # print('train adapter w/o efc!')    # transformer+adapter
         for n, p in model.named_parameters():
             if 'transformer' in n:
                 p.requires_grad = False # True/False
             elif 'adapter_blocks' in n:
                 if '.efc' in n:
                     p.requires_grad = False
-                    # p.requires_grad = True if '.efc1' in n and hparams.expand_mask else False
                 else:
                     p.requires_grad = True # True/False
     else:
-        # if model.CL == "LIMIT-REPLAY" and not hparams.single:
-        #     print('Train transformer!') # adapter+
-        # elif hparams.freeze_emb:
-        #     print('Train adapter+transformer w/o emb!')
-        # else:
-        #     print('Train adapter!')   # transformer+
         for n, p in model.named_parameters():   # lnf.weight/bias
             if model.CL == "ADAPTER" or hparams.single:
                 if 'transformer' in n:
                     p.requires_grad = False # True/False
-                    # if hparams.freeze_emb and ('wte' in n or 'wpe' in n):
-                    #     p.requires_grad = False
-                    # else:
-                    #     p.requires_grad = True
                 elif 'adapter_blocks' in n:
                     if hparams.expand_mask: # or hparams.split_mask
                         p.requires_grad = False if '.efc2' in n else True
@@ -308,11 +258,6 @@ def set_requires_grad(model, retrain=False):
                         p.requires_grad = True
             else:
                 p.requires_grad = True
-
-            # if model.CL != "LIMIT-REPLAY" and model.CL != "ADAPTER":
-            #     p.requires_grad = True
-            # elif model.CL == "LIMIT-REPLAY" and not hparams.single:
-            #     p.requires_grad = True
 
 def configure_optimizers(model, retrain=False):
     if(model.CL=="ADAPTER"):
@@ -330,18 +275,7 @@ def configure_optimizers(model, retrain=False):
                                         not (True in [ele in str(n) for ele in freeze_layers])]
                 logger.info(f'train adapter w/o efc with lr {lr}')
             else:
-                # if hparams.mask_CIL:
-                # lr_adapters = model.lr
-                # lr_transformer = 0.01*model.lr
                 params_to_optimize_via_AdamW = [p for n, p in model.named_parameters() if "adapter" in str(n)]
-                '''if hparams.freeze_emb:
-                        freeze_layers = ["adapter", '.wte.', '.wpe.']
-                        params_to_optimize_via_AdamW2 = [p for n, p in model.named_parameters() if not (True in [ele in str(n) for ele in freeze_layers])]
-                    else:
-                        params_to_optimize_via_AdamW2 = [p for n, p in model.named_parameters() if "adapter" not in str(n)]        
-                    optimizer_network = AdamW(params_to_optimize_via_AdamW2, lr=lr_transformer, correct_bias=True)  # weight_decay=0.0                
-                    optimizers.add(optimizer_network, lr_transformer)'''
-
                 parameters_to_update = params_to_optimize_via_AdamW
                 logger.info('Train adapter!')
 
@@ -350,11 +284,6 @@ def configure_optimizers(model, retrain=False):
             parameters_to_update = [p for n, p in model.named_parameters() if
                                              not (True in [ele in str(n) for ele in freeze_layers])]
             logger.info(f'train adapter w/o efc with lr {lr}')
-            # parameters_to_update = [p for n, p in model.named_parameters() if "adapter" in str(n)]
-            # retrain_lr = hparams.retrain_lr_factor * model.lr
-            # optimizer = AdamW(parameters_to_update, lr=lr, correct_bias=True)
-            # optimizers.add(optimizer, lr)
-
 
         optimizer = AdamW(parameters_to_update, lr=lr, correct_bias=True)  # weight_decay=1e-8
         optimizers.add(optimizer, lr)

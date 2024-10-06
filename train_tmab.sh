@@ -20,28 +20,28 @@ episodic_mem_size=200
 sample_domain=2000
 
 # train_adapter_expand train_wo_pytorch_lightning
-#CUDA_VISIBLE_DEVICES=$GPU_ID python ./train_adapter_expand.py \
-#  --episodic_mem_size $episodic_mem_size \
-#  --task_type $task_type \
-#  --CL $CL \
-#  --bottleneck_size $bottleneck_size \
-#  --lr $lr \
-#  --n_epochs $n_epochs \
-#  --train_batch_size $train_batch_size \
-#  --gradient_accumulation_steps $gradient_accumulation_steps \
-#  --seed $seed \
-#  --dataset_list $dataset_list \
-#  --test_every_step \
-#  --single \
-#  -mi \
-#  -e \
-#  -nm 3 \
-#  \
-#  -aug 3 \
-#  -sd $sample_domain \
-#  -mqs $meta_query_step \
-#  \
-#  --mask || exit
+CUDA_VISIBLE_DEVICES=$GPU_ID python ./train_adapter_expand.py \
+ --episodic_mem_size $episodic_mem_size \
+ --task_type $task_type \
+ --CL $CL \
+ --bottleneck_size $bottleneck_size \
+ --lr $lr \
+ --n_epochs $n_epochs \
+ --train_batch_size $train_batch_size \
+ --gradient_accumulation_steps $gradient_accumulation_steps \
+ --seed $seed \
+ --dataset_list $dataset_list \
+ --test_every_step \
+ --single \
+ -mi \
+ -e \
+ -nm 3 \
+ \
+ -aug 3 \
+ -sd $sample_domain \
+ -mqs $meta_query_step \
+ \
+ --mask || exit
 
 #CUDA_VISIBLE_DEVICES=$GPU_ID python ./train_adapter_expand.py \
 #  --episodic_mem_size $episodic_mem_size \
@@ -122,34 +122,34 @@ sample_domain=2000
 #   -na 3 \
 #   --mask || exit
 
-CUDA_VISIBLE_DEVICES=$GPU_ID python ./test_fwt.py \
-  --episodic_mem_size $episodic_mem_size \
-  --task_type $task_type \
-  --CL $CL \
-  --bottleneck_size $bottleneck_size \
-  --lr $lr \
-  --n_epochs $n_epochs \
-  --train_batch_size $train_batch_size \
-  --gradient_accumulation_steps $gradient_accumulation_steps \
-  --seed $seed \
-  --dataset_list $dataset_list \
-  --test_every_step \
-  --single \
-  -mi \
-  --retrain \
-  --retrain_lr_factor $retrain_lr_factor \
-  --retrain_epochs $retrain_epochs \
-  --retrain_gradient_accumulation_steps $retrain_gradient_accumulation_steps\
-  -k1 \
-  -u \
-  -b \
-  -aug 3 \
-  -sd $sample_domain \
-  -mqs $meta_query_step \
-  --meta \
-  -sm \
-  -na 3 \
-  --mode test \
-  -fwt \
-  -notil \
-  --mask || exit
+# CUDA_VISIBLE_DEVICES=$GPU_ID python ./test_fwt.py \
+#   --episodic_mem_size $episodic_mem_size \
+#   --task_type $task_type \
+#   --CL $CL \
+#   --bottleneck_size $bottleneck_size \
+#   --lr $lr \
+#   --n_epochs $n_epochs \
+#   --train_batch_size $train_batch_size \
+#   --gradient_accumulation_steps $gradient_accumulation_steps \
+#   --seed $seed \
+#   --dataset_list $dataset_list \
+#   --test_every_step \
+#   --single \
+#   -mi \
+#   --retrain \
+#   --retrain_lr_factor $retrain_lr_factor \
+#   --retrain_epochs $retrain_epochs \
+#   --retrain_gradient_accumulation_steps $retrain_gradient_accumulation_steps\
+#   -k1 \
+#   -u \
+#   -b \
+#   -aug 3 \
+#   -sd $sample_domain \
+#   -mqs $meta_query_step \
+#   --meta \
+#   -sm \
+#   -na 3 \
+#   --mode test \
+#   -fwt \
+#   -notil \
+#   --mask || exit
