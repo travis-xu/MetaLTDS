@@ -1,5 +1,7 @@
 # MetaLTDS
-Code for our paper [Balanced Meta Learning and Diverse Sampling for Lifelong Task-Oriented Dialogue Systems](https://ojs.aaai.org/index.php/AAAI/article/view/26621/26393) (AAAI2023). ![MetaLTDS](/assets/MetaLTDS.png)
+Code for our paper [Balanced Meta Learning and Diverse Sampling for Lifelong Task-Oriented Dialogue Systems](https://ojs.aaai.org/index.php/AAAI/article/view/26621/26393) (AAAI2023).
+
+![MetaLTDS](/assets/MetaLTDS.png)
 
 ## Installation
 
